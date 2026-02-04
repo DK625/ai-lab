@@ -1,0 +1,9 @@
+{
+    "mcpServers": {
+        "exa": {
+            "type": "http",
+            "url": "https://mcp.exa.ai/mcp?exaApiKey=c6c84649-a8ed-448b-897e-cf5b82d2f55d",
+            "headers": {}
+        }
+    }
+}
