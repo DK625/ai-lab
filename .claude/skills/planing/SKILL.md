@@ -15,23 +15,52 @@ USER REQUEST → Discovery → Synthesis → Verification → Decomposition → 
 
 | Phase             | Tool                                     | Output                              |
 | ----------------- | ---------------------------------------- | ----------------------------------- |
-| 1. Discovery      | Parallel sub-agents, gkg, Librarian, exa | Discovery Report                    |
+| 1. Discovery      | Parallel sub-agents (A, B, C, D), gkg, exa | Discovery Report                  |
 | 2. Synthesis      | Oracle                                   | Approach + Risk Map                 |
 | 3. Verification   | Spikes via MULTI_AGENT_WORKFLOW          | Validated Approach + Learnings      |
 | 4. Decomposition  | file-beads skill                         | .beads/\*.md files                  |
 | 5. Validation     | bv + Oracle                              | Validated dependency graph          |
 | 6. Track Planning | bv --robot-plan                          | Execution plan with parallel tracks |
 
+## Required Tools
+
+Before running the pipeline, ensure all required MCP servers and CLI tools are installed:
+
+### MCP Servers (Required)
+
+| MCP Server | Tools Provided | Used By | Install |
+| ---------- | -------------- | ------- | ------- |
+| **gkg** | `repo_map`, `search_codebase_definitions`, `get_references` | Agent A, Agent B | Install gkg MCP server |
+| **exa** | `web_search_exa`, `get_code_context_exa` | Agent D | `claude mcp add -e EXA_API_KEY=<key> exa -- npx -y exa-mcp-server` |
+
+### CLI Tools (Required)
+
+| Tool | Purpose | Used In |
+| ---- | ------- | ------- |
+| `bd` | Bead management (create, close, update, dep add/remove, show) | Phase 3, 4, 5 |
+| `bv` | Bead validator (--robot-suggest, --robot-insights, --robot-priority, --robot-plan) | Phase 5, 6 |
+| `jq` | Parse JSON output from bv commands | Phase 5, 6 |
+
+### Skills (Required)
+
+| Skill | Purpose | Used In |
+| ----- | ------- | ------- |
+| `file-beads` | Convert approach into beads (epics + issues) via `bd create` | Phase 4 |
+| `orchestrator` | Spawn parallel worker agents to execute beads | After Phase 6 |
+
+### Note on Librarian
+
+AmpCode's Librarian is NOT available in Claude Code. Agent D (`discovery-external`) replaces this role by using Exa's `web_search_exa` to find design patterns and best practices from the web.
+
 ## Phase 1: Discovery (Parallel Exploration)
 
 Launch parallel sub-agents to gather codebase intelligence:
 
 ```
-Task() → Agent A: Architecture snapshot (gkg repo_map)
-Task() → Agent B: Pattern search (find similar existing code)
-Task() → Agent C: Constraints (package.json, tsconfig, deps)
-Librarian → External patterns ("how do similar projects do this?")
-exa → Library docs (if external integration needed)
+Task() → Agent A (discovery-architecture): Architecture snapshot (gkg repo_map)
+Task() → Agent B (discovery-patterns):     Pattern search (gkg search_codebase_definitions + get_references)
+Task() → Agent C (discovery-constraints):  Constraints (package.json, tsconfig, deps)
+Task() → Agent D (discovery-external):     External patterns + Library docs (exa web_search + get_code_context)
 ```
 
 ### Discovery Report Template
@@ -70,10 +99,13 @@ Save to `history/<feature>/discovery.md`:
 Feed Discovery Report to Oracle for gap analysis:
 
 ```
-oracle(
-  task: "Analyze gap between current codebase and feature requirements",
-  context: "Discovery report attached. User wants: <feature>",
-  files: ["history/<feature>/discovery.md"]
+Task(
+  subagent_type="oracle-planner",
+  description="Phase 2: Synthesis — gap analysis and risk assessment",
+  prompt="You are in PHASE 2: SYNTHESIS.
+    Feature: <feature>
+    Read history/<feature>/discovery.md and produce approach.md.
+    Follow Phase 2 instructions in your agent definition."
 )
 ```
 
@@ -179,10 +211,14 @@ Use the MULTI_AGENT_WORKFLOW:
 ### Aggregate Spike Results
 
 ```
-oracle(
-  task: "Synthesize spike results and update approach",
-  context: "Spikes completed. Results: ...",
-  files: ["history/<feature>/approach.md"]
+Task(
+  subagent_type="oracle-planner",
+  description="Phase 3: Spike Aggregation — update approach with learnings",
+  prompt="You are in PHASE 3: SPIKE AGGREGATION.
+    Feature: <feature>
+    Spike results: <results summary>
+    Read history/<feature>/approach.md and update it with validated learnings.
+    Follow Phase 3 instructions in your agent definition."
 )
 ```
 
@@ -249,10 +285,14 @@ bd update <id> --priority X # Adjust priorities
 ### Oracle Final Review
 
 ```
-oracle(
-  task: "Review plan completeness and clarity",
-  context: "Plan ready. Check for gaps, unclear beads, missing deps.",
-  files: [".beads/"]
+Task(
+  subagent_type="oracle-planner",
+  description="Phase 5: Bead Validation — review completeness and clarity",
+  prompt="You are in PHASE 5: BEAD VALIDATION.
+    Feature: <feature>
+    Read .beads/*.md files, run bv analysis, cross-reference with history/<feature>/approach.md.
+    Follow Phase 5 instructions in your agent definition.
+    Produce a review report with verdict: READY or NEEDS FIXES."
 )
 ```
 
@@ -359,6 +399,16 @@ bv --robot-insights 2>/dev/null | jq '.Cycles'
 bv --robot-plan 2>/dev/null | jq '.plan.unassigned'
 ```
 
+## Handoff to Orchestrator
+
+After Phase 6 is complete and `execution-plan.md` is validated, hand off to the `orchestrator` skill to begin execution:
+
+```
+skill("orchestrator")
+```
+
+The orchestrator will read `history/<feature>/execution-plan.md` and spawn parallel worker agents for each track.
+
 ## Output Artifacts
 
 | Artifact          | Location                              | Purpose                            |
@@ -374,16 +424,27 @@ bv --robot-plan 2>/dev/null | jq '.plan.unassigned'
 
 ### Tool Selection
 
-| Need               | Tool                                    |
-| ------------------ | --------------------------------------- |
-| Codebase structure | `mcp__gkg__repo_map`                    |
-| Find definitions   | `mcp__gkg__search_codebase_definitions` |
-| Find usages        | `mcp__gkg__get_references`              |
-| External patterns  | `librarian`                             |
-| Library docs       | `mcp__exa__get_code_context_exa`        |
-| Gap analysis       | `oracle`                                |
-| Create beads       | `skill("file-beads")` + `bd create`     |
-| Validate graph     | `bv --robot-*`                          |
+| Need               | Tool                                    | Agent/Phase |
+| ------------------ | --------------------------------------- | ----------- |
+| Codebase structure | `mcp__gkg__repo_map`                    | Agent A (Phase 1) |
+| Find definitions   | `mcp__gkg__search_codebase_definitions` | Agent A, B (Phase 1) |
+| Find usages        | `mcp__gkg__get_references`              | Agent B (Phase 1) |
+| External patterns  | `mcp__exa__web_search_exa`              | Agent D (Phase 1) |
+| Library docs       | `mcp__exa__get_code_context_exa`        | Agent D (Phase 1) |
+| Gap analysis       | `oracle-planner` agent                  | Phase 2, 3, 5 |
+| Create beads       | `skill("file-beads")` + `bd create`     | Phase 4 |
+| Validate graph     | `bv --robot-*`                          | Phase 5, 6 |
+
+### Agent → Tool Mapping
+
+| Agent | Required MCP | Required CLI | Called In |
+| ----- | ------------ | ------------ | -------- |
+| `discovery-architecture` (A) | gkg: `repo_map`, `search_codebase_definitions` | — | Phase 1 |
+| `discovery-patterns` (B) | gkg: `search_codebase_definitions`, `get_references` | — | Phase 1 |
+| `discovery-constraints` (C) | — (uses built-in Read/Glob) | — | Phase 1 |
+| `discovery-external` (D) | exa: `web_search_exa`, `get_code_context_exa` | — | Phase 1 |
+| `oracle-planner` | — | `bd show`, `bv --robot-suggest/insights/priority` | Phase 2, 3, 5 |
+| Planning orchestrator | — | `bd create/close/update/dep`, `bv --robot-*` | Phase 3, 4, 5, 6 |
 
 ### Common Mistakes
 
@@ -392,3 +453,4 @@ bv --robot-plan 2>/dev/null | jq '.plan.unassigned'
 - **No spikes for HIGH risk** → Blocked workers
 - **Missing learnings in beads** → Workers re-discover same issues
 - **No bv validation** → Broken dependency graph
+- **Missing MCP servers** → Agents fail at startup; install gkg and exa first
